@@ -595,3 +595,10 @@ variable "putin_khuylo" {
   type        = bool
   default     = true
 }
+
+
+variable "jose" {
+  description = "jose"
+  type = string
+  default = "jose"
+}
