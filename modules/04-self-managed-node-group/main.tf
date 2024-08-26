@@ -57,7 +57,7 @@ data "aws_ssm_parameter" "ami" {
 ################################################################################
 
 module "user_data" {
-  source = "../user_data"
+  source = "../01-user-data"
 
   create                    = var.create
   platform                  = local.user_data_type

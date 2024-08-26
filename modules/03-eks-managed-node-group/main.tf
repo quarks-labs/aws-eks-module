@@ -6,7 +6,7 @@ data "aws_caller_identity" "current" {}
 ################################################################################
 
 module "user_data" {
-  source = "../user_data"
+  source = "../01-user-data"
   create   = var.create
   platform = var.platform
   ami_type = var.ami_type
@@ -341,11 +341,8 @@ resource "aws_launch_template" "this" {
 ################################################################################
 
 locals {
-  # Just to ensure templating doesn't fail when values are not provided
   ssm_cluster_version = var.cluster_version != null ? var.cluster_version : ""
   ssm_ami_type        = var.ami_type != null ? var.ami_type : ""
-
-  # Map the AMI type to the respective SSM param path
   ssm_ami_type_to_ssm_param = {
     AL2_x86_64                 = "/aws/service/eks/optimized-ami/${local.ssm_cluster_version}/amazon-linux-2/recommended/release_version"
     AL2_x86_64_GPU             = "/aws/service/eks/optimized-ami/${local.ssm_cluster_version}/amazon-linux-2-gpu/recommended/release_version"
@@ -363,9 +360,7 @@ locals {
     AL2023_ARM_64_STANDARD     = "/aws/service/eks/optimized-ami/${local.ssm_cluster_version}/amazon-linux-2023/arm64/standard/recommended/release_version"
   }
 
-  # The Windows SSM params currently do not have a release version, so we have to get the full output JSON blob and parse out the release version
   windows_latest_ami_release_version = var.create && var.use_latest_ami_release_version && startswith(local.ssm_ami_type, "WINDOWS") ? nonsensitive(jsondecode(data.aws_ssm_parameter.ami[0].value)["release_version"]) : null
-  # Based on the steps above, try to get an AMI release version - if not, `null` is returned
   latest_ami_release_version = startswith(local.ssm_ami_type, "WINDOWS") ? local.windows_latest_ami_release_version : try(nonsensitive(data.aws_ssm_parameter.ami[0].value), null)
 }
 
@@ -387,8 +382,6 @@ locals {
 
 resource "aws_eks_node_group" "this" {
   count = var.create ? 1 : 0
-
-  # Required
   cluster_name  = var.cluster_name
   node_role_arn = var.create_iam_role ? aws_iam_role.this[0].arn : var.iam_role_arn
   subnet_ids    = local.create_placement_group ? data.aws_subnets.placement_group[0].ids : var.subnet_ids
@@ -402,16 +395,13 @@ resource "aws_eks_node_group" "this" {
   # Optional
   node_group_name        = var.use_name_prefix ? null : var.name
   node_group_name_prefix = var.use_name_prefix ? "${var.name}-" : null
-
-  # https://docs.aws.amazon.com/eks/latest/userguide/launch-templates.html#launch-template-custom-ami
   ami_type        = var.ami_id != "" ? null : var.ami_type
   release_version = var.ami_id != "" ? null : var.use_latest_ami_release_version ? local.latest_ami_release_version : var.ami_release_version
   version         = var.ami_id != "" ? null : var.cluster_version
 
   capacity_type        = var.capacity_type
-  disk_size            = var.use_custom_launch_template ? null : var.disk_size # if using a custom LT, set disk size on custom LT or else it will error here
+  disk_size            = var.use_custom_launch_template ? null : var.disk_size 
   force_update_version = var.force_update_version
-  # ML capacity block reservation requires instance type to be set on the launch template
   instance_types = var.capacity_type == "CAPACITY_BLOCK" ? null : var.instance_types
   labels         = var.labels
 
@@ -477,10 +467,8 @@ resource "aws_eks_node_group" "this" {
 
 locals {
   create_iam_role = var.create && var.create_iam_role
-
   iam_role_name          = coalesce(var.iam_role_name, "${var.name}-eks-node-group")
   iam_role_policy_prefix = "arn:${data.aws_partition.current.partition}:iam::aws:policy"
-
   ipv4_cni_policy = { for k, v in {
     AmazonEKS_CNI_Policy = "${local.iam_role_policy_prefix}/AmazonEKS_CNI_Policy"
   } : k => v if var.iam_role_attach_cni_policy && var.cluster_ip_family == "ipv4" }
@@ -518,7 +506,6 @@ resource "aws_iam_role" "this" {
   tags = merge(var.tags, var.iam_role_tags)
 }
 
-# Policies attached ref https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eks_node_group
 resource "aws_iam_role_policy_attachment" "this" {
   for_each = { for k, v in merge(
     {
@@ -535,7 +522,6 @@ resource "aws_iam_role_policy_attachment" "this" {
 
 resource "aws_iam_role_policy_attachment" "additional" {
   for_each = { for k, v in var.iam_role_additional_policies : k => v if local.create_iam_role }
-
   policy_arn = each.value
   role       = aws_iam_role.this[0].name
 }
@@ -595,7 +581,6 @@ data "aws_iam_policy_document" "role" {
 
 resource "aws_iam_role_policy" "this" {
   count = local.create_iam_role_policy ? 1 : 0
-
   name        = var.iam_role_use_name_prefix ? null : local.iam_role_name
   name_prefix = var.iam_role_use_name_prefix ? "${local.iam_role_name}-" : null
   policy      = data.aws_iam_policy_document.role[0].json
@@ -618,20 +603,6 @@ resource "aws_placement_group" "this" {
 
   tags = var.tags
 }
-
-################################################################################
-# Instance AZ Lookup
-
-# Instances usually used in placement groups w/ EFA are only available in
-# select availability zones. These data sources will cross reference the availability
-# zones supported by the instance type with the subnets provided to ensure only
-# AZs/subnets that are supported are used.
-################################################################################
-
-# Find the availability zones supported by the instance type
-# TODO - remove at next breaking change
-# Force users to be explicit about which AZ to use when using placement groups,
-# with or without EFA support
 data "aws_ec2_instance_type_offerings" "this" {
   count = local.enable_efa_support ? 1 : 0
 
@@ -643,8 +614,6 @@ data "aws_ec2_instance_type_offerings" "this" {
   location_type = "availability-zone-id"
 }
 
-# Reverse the lookup to find one of the subnets provided based on the availability
-# availability zone ID of the queried instance type (supported)
 data "aws_subnets" "placement_group" {
   count = local.create_placement_group ? 1 : 0
 
@@ -679,18 +648,13 @@ data "aws_subnets" "placement_group" {
 
 resource "aws_autoscaling_schedule" "this" {
   for_each = { for k, v in var.schedules : k => v if var.create && var.create_schedule }
-
   scheduled_action_name  = each.key
   autoscaling_group_name = aws_eks_node_group.this[0].resources[0].autoscaling_groups[0].name
-
   min_size         = try(each.value.min_size, null)
   max_size         = try(each.value.max_size, null)
   desired_capacity = try(each.value.desired_size, null)
   start_time       = try(each.value.start_time, null)
   end_time         = try(each.value.end_time, null)
   time_zone        = try(each.value.time_zone, null)
-
-  # [Minute] [Hour] [Day_of_Month] [Month_of_Year] [Day_of_Week]
-  # Cron examples: https://crontab.guru/examples.html
   recurrence = try(each.value.recurrence, null)
 }
